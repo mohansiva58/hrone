@@ -109,6 +109,12 @@ local-only and are intentionally excluded from the public repository.
 | **R9** | **Headcount.** Employees with joined_on on or before the end of the period, whether or not they have any logs. |
 | **R10** | **Pagination.** page starts at 1; page_size default 20, max 100; total always reflects the filters. |
 
+Employee shifts with equal start and end times are valid 24-hour overnight shifts.
+Attendance request bodies ignore supplied `work_hours`, `late_minutes`,
+`overtime_minutes`, and `half_day`; the API always computes these read-only fields.
+Unrelated unknown request fields and explicit nulls for non-nullable inputs remain
+invalid.
+
 ## Submission checklist
 
 - [x] `app/main.py` — all application code in this one file

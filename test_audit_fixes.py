@@ -6,7 +6,7 @@ Phase 3 regression tests covering all issues fixed in the final audit:
   D. Status enum validation in GET /attendance
   E. Concurrent punch-out (exactly one 200, rest 409)
   F. Concurrent regularization (no lost history entries)
-  G. Extra fields in RegularizeIn -> 422 (contract says derived fields are read-only)
+  G. Known derived request fields are ignored; unrelated unknown fields are rejected
   H. Explicit null punched_at behaves like omitted (uses server time)
   I. 92-day trend boundary (92 days OK, 93 days -> 422)
   J. Reversed trend date range -> 422
@@ -371,66 +371,227 @@ class TestConcurrentRegularization:
 
 
 # ===========================================================================
-# G. Extra fields in RegularizeIn rejected (contract: derived fields read-only)
+# G. Known derived fields are ignored; unknown fields remain rejected
 # ===========================================================================
 
 class TestRegularizeExtraFields:
-    def test_sending_work_hours_rejected(self, clean_db):
-        """work_hours is a derived read-only field; sending it must yield 422."""
+    def test_derived_fields_are_ignored_across_attendance_requests(self, clean_db):
+        """Supplied read-only fields never override values computed from timestamps."""
+        _create_emp(clean_db)
+        punch_in_ts = _ts(_utc(2026, 7, 6, 10, 0))
+        res_in = clean_db.post(
+            "/attendance/punch-in",
+            json={
+                "emp_code": "EMP0050",
+                "punched_at": punch_in_ts,
+                "late_minutes": 999,
+                "work_hours": 999,
+                "overtime_minutes": 999,
+                "half_day": True,
+            },
+        )
+        assert res_in.status_code == 201, res_in.text
+        assert res_in.json()["late_minutes"] == 30
+        assert res_in.json()["work_hours"] is None
+        assert res_in.json()["overtime_minutes"] == 0
+        assert res_in.json()["half_day"] is False
+
+        punch_out_ts = _ts(_utc(2026, 7, 6, 19, 0))
+        res_out = clean_db.post(
+            "/attendance/punch-out",
+            json={
+                "emp_code": "EMP0050",
+                "punched_at": punch_out_ts,
+                "late_minutes": 999,
+                "work_hours": 999,
+                "overtime_minutes": 999,
+                "half_day": True,
+            },
+        )
+        assert res_out.status_code == 200, res_out.text
+        assert res_out.json()["late_minutes"] == 30
+        assert res_out.json()["work_hours"] == 9.0
+        assert res_out.json()["overtime_minutes"] == 30
+        assert res_out.json()["half_day"] is False
+
+        corrected_punch_in_ts = _ts(_utc(2026, 7, 6, 9, 45))
+        res_patch = clean_db.patch(
+            "/attendance/EMP0050/2026-07-06",
+            json={
+                "punch_in": corrected_punch_in_ts,
+                "reason": "Correcting biometric punch time",
+                "regularized_by": "hr.admin",
+                "late_minutes": 999,
+                "work_hours": 999,
+                "overtime_minutes": 999,
+                "half_day": True,
+            },
+        )
+        assert res_patch.status_code == 200, res_patch.text
+        assert res_patch.json()["late_minutes"] == 15
+        assert res_patch.json()["work_hours"] == 9.25
+        assert res_patch.json()["overtime_minutes"] == 30
+        assert res_patch.json()["half_day"] is False
+        saved = db.attendance_logs.find_one({"emp_code": "EMP0050", "date": "2026-07-06"})
+        assert saved["late_minutes"] == 15
+        assert saved["work_hours"] == 9.25
+        assert saved["overtime_minutes"] == 30
+        assert saved["half_day"] is False
+
+    def test_only_derived_fields_still_mean_no_regularization(self, clean_db):
+        """Ignored fields alone are not an editable attendance change."""
         _create_emp(clean_db)
         _punch_in(clean_db, "EMP0050", 10, 0)
-
         res = clean_db.patch(
             "/attendance/EMP0050/2026-07-06",
             json={
                 "work_hours": 8.0,
-                "reason": "Trying to inject work_hours",
-                "regularized_by": "bad_actor"
-            }
-        )
-        assert res.status_code == 422
-
-    def test_sending_late_minutes_rejected(self, clean_db):
-        _create_emp(clean_db)
-        _punch_in(clean_db, "EMP0050", 10, 0)
-
-        res = clean_db.patch(
-            "/attendance/EMP0050/2026-07-06",
-            json={
                 "late_minutes": 0,
-                "reason": "Trying to inject late_minutes",
-                "regularized_by": "bad_actor"
-            }
-        )
-        assert res.status_code == 422
-
-    def test_sending_overtime_minutes_rejected(self, clean_db):
-        _create_emp(clean_db)
-        _punch_in(clean_db, "EMP0050", 10, 0)
-
-        res = clean_db.patch(
-            "/attendance/EMP0050/2026-07-06",
-            json={
                 "overtime_minutes": 0,
-                "reason": "Trying to inject overtime",
-                "regularized_by": "bad_actor"
-            }
-        )
-        assert res.status_code == 422
-
-    def test_sending_half_day_rejected(self, clean_db):
-        _create_emp(clean_db)
-        _punch_in(clean_db, "EMP0050", 10, 0)
-
-        res = clean_db.patch(
-            "/attendance/EMP0050/2026-07-06",
-            json={
                 "half_day": False,
-                "reason": "Trying to inject half_day",
-                "regularized_by": "bad_actor"
+                "reason": "Attempting derived-only correction",
+                "regularized_by": "hr.admin",
             }
         )
         assert res.status_code == 422
+        assert "No change specified" in res.json()["detail"]
+
+    def test_unrelated_unknown_fields_remain_rejected(self, clean_db):
+        _create_emp(clean_db)
+        responses = [
+            clean_db.post(
+                "/attendance/punch-in",
+                json={"emp_code": "EMP0050", "unknown_field": True},
+            ),
+            clean_db.post(
+                "/attendance/punch-out",
+                json={"emp_code": "EMP0050", "unknown_field": True},
+            ),
+            clean_db.patch(
+                "/attendance/EMP0050/2026-07-06",
+                json={
+                    "status": "LEAVE",
+                    "reason": "Valid regularization",
+                    "regularized_by": "hr.admin",
+                    "unknown_field": True,
+                },
+            ),
+        ]
+        assert [response.status_code for response in responses] == [422, 422, 422]
+
+
+def _insert_analytics_employee(emp_code, department, joined_on="2026-07-01"):
+    db.employees.insert_one({
+        "emp_code": emp_code,
+        "name": f"Employee {emp_code}",
+        "email": f"{emp_code.lower()}@example.com",
+        "department": department,
+        "shift_start": "09:30",
+        "shift_end": "18:30",
+        "joined_on": joined_on,
+    })
+
+
+def _insert_analytics_log(emp_code, day, status="PRESENT", work_hours=None, late_minutes=0, overtime_minutes=0, half_day=False):
+    doc = {
+        "emp_code": emp_code,
+        "date": day,
+        "status": status,
+        "work_hours": work_hours,
+        "late_minutes": late_minutes,
+        "overtime_minutes": overtime_minutes,
+        "half_day": half_day,
+    }
+    db.attendance_logs.insert_one(doc)
+
+
+class TestAnalyticsBusinessResults:
+    def test_department_summary_headcount_eligibility_and_record_average(self, clean_db):
+        """Counts eligible zero-log staff and averages only qualifying log records."""
+        _insert_analytics_employee("EMP1001", "SummaryDept")
+        _insert_analytics_employee("EMP1002", "SummaryDept", "2026-07-13")
+        _insert_analytics_employee("EMP1003", "SummaryDept", "2026-08-01")
+        _insert_analytics_employee("EMP1004", "SummaryDept")
+
+        _insert_analytics_log("EMP1001", "2026-07-06", work_hours=2.0)
+        _insert_analytics_log("EMP1001", "2026-07-07", work_hours=8.0)
+        _insert_analytics_log("EMP1001", "2026-07-04", work_hours=12.0, late_minutes=35, overtime_minutes=45)
+        _insert_analytics_log("EMP1001", "2026-07-08", status="LEAVE", work_hours=20.0)
+        _insert_analytics_log("EMP1001", "2026-07-09", work_hours=None)
+        _insert_analytics_log("EMP1002", "2026-07-13", status="WFH", work_hours=8.0)
+
+        response = clean_db.get("/analytics/departments/summary?month=2026-07&department=SummaryDept")
+        assert response.status_code == 200, response.text
+        summary = response.json()["items"][0]
+        assert summary["headcount"] == 3
+        assert summary["present_days"] == 4.0
+        assert summary["avg_work_hours"] == 7.5
+        assert summary["late_count"] == 1
+        assert summary["total_late_minutes"] == 35
+        assert summary["leave_count"] == 1
+
+        monthly = clean_db.get("/analytics/employees/EMP1001/monthly?month=2026-07")
+        assert monthly.status_code == 200, monthly.text
+        monthly_data = monthly.json()
+        assert monthly_data["present_days"] == 3.0
+        assert monthly_data["late_count"] == 1
+        assert monthly_data["total_late_minutes"] == 35
+        assert monthly_data["total_overtime_minutes"] == 45
+
+    def test_leaderboard_includes_all_ties_at_limit_in_employee_order(self, clean_db):
+        """All employees tied at rank=limit are returned, ordered by employee code."""
+        for emp_code in ("EMP1101", "EMP1102", "EMP1103", "EMP1104"):
+            _insert_analytics_employee(emp_code, "LeaderboardDept")
+        for emp_code, minutes in (
+            ("EMP1101", 100),
+            ("EMP1102", 80),
+            ("EMP1103", 80),
+            ("EMP1104", 50),
+        ):
+            _insert_analytics_log(emp_code, "2026-07-06", late_minutes=minutes)
+
+        response = clean_db.get("/analytics/leaderboard/late?month=2026-07&limit=2")
+        assert response.status_code == 200, response.text
+        rows = response.json()["items"]
+        assert [(row["rank"], row["emp_code"]) for row in rows] == [
+            (1, "EMP1101"),
+            (2, "EMP1102"),
+            (2, "EMP1103"),
+        ]
+
+    def test_trend_dates_zero_rates_null_days_and_moving_average(self, clean_db):
+        """Trend returns every requested date and averages only non-null rates."""
+        _insert_analytics_employee("EMP1201", "TrendCoverage", "2026-07-01")
+        _insert_analytics_employee("EMP1202", "TrendCoverage", "2026-07-06")
+        _insert_analytics_log("EMP1201", "2026-07-06")
+
+        response = clean_db.get(
+            "/analytics/departments/TrendCoverage/trend?from=2026-06-29&to=2026-07-06"
+        )
+        assert response.status_code == 200, response.text
+        rows = response.json()["items"]
+        assert [row["date"] for row in rows] == [
+            "2026-06-29", "2026-06-30", "2026-07-01", "2026-07-02",
+            "2026-07-03", "2026-07-04", "2026-07-05", "2026-07-06",
+        ]
+        no_headcount = rows[0]
+        assert no_headcount["headcount"] == 0
+        assert no_headcount["attendance_rate"] is None
+        assert no_headcount["moving_avg_7d"] is None
+        zero_day = rows[2]
+        assert zero_day["is_working_day"] is True
+        assert zero_day["headcount"] == 1
+        assert zero_day["attendance_rate"] == 0.0
+        saturday, sunday = rows[5:7]
+        assert saturday["is_working_day"] is False
+        assert sunday["is_working_day"] is False
+        assert saturday["attendance_rate"] is None
+        assert sunday["attendance_rate"] is None
+        last_day = rows[-1]
+        assert last_day["headcount"] == 2
+        assert last_day["present_count"] == 1.0
+        assert last_day["attendance_rate"] == 0.5
+        assert last_day["moving_avg_7d"] == 0.125
 
 
 # ===========================================================================

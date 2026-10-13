@@ -28,6 +28,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 VALID_ALL_STATUSES = frozenset({"PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"})
 VALID_PUNCH_STATUSES = frozenset({"PRESENT", "WFH", "ON_DUTY"})
+DERIVED_ATTENDANCE_FIELDS = frozenset({"work_hours", "late_minutes", "overtime_minutes", "half_day"})
 
 def is_local_host(host_str: str) -> bool:
     """Return True only for loopback hosts and explicit local Docker hostnames."""
@@ -110,6 +111,12 @@ def validate_raw_epoch_ms(v: Any) -> Any:
         if not (100000000000 <= v <= 4102444800000):
             raise ValueError("Timestamp out of range")
     return v
+
+
+def ignore_derived_attendance_fields(data: Any) -> Any:
+    if isinstance(data, dict):
+        return {key: value for key, value in data.items() if key not in DERIVED_ATTENDANCE_FIELDS}
+    return data
 
 
 def validate_date_str(s: Optional[str], field_name: str = "date") -> None:
@@ -685,6 +692,7 @@ class PunchInIn(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_explicit_null(cls, data: Any) -> Any:
+        data = ignore_derived_attendance_fields(data)
         if isinstance(data, dict) and "punched_at" in data and data["punched_at"] is None:
             raise ValueError("punched_at cannot be null; omit the field to default to current server time")
         return data
@@ -709,6 +717,7 @@ class PunchOutIn(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_explicit_null(cls, data: Any) -> Any:
+        data = ignore_derived_attendance_fields(data)
         if isinstance(data, dict) and "punched_at" in data and data["punched_at"] is None:
             raise ValueError("punched_at cannot be null; omit the field to default to current server time")
         return data
@@ -730,6 +739,7 @@ class RegularizeIn(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_explicit_null(cls, data: Any) -> Any:
+        data = ignore_derived_attendance_fields(data)
         if isinstance(data, dict):
             if "status" in data and data["status"] is None:
                 raise ValueError("status cannot be null; omit the field if not modifying")
@@ -764,9 +774,6 @@ def health():
 
 @app.post("/employees", status_code=201)
 def create_employee(body: EmployeeIn):
-    if body.shift_start == body.shift_end:
-        raise HTTPException(422, "shift_start and shift_end must differ")
-
     doc = body.model_dump()
     now_utc = truncate_to_seconds(datetime.now(timezone.utc))
     doc["created_at"] = now_utc
