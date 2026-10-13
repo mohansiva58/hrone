@@ -810,8 +810,8 @@ class TestDepartmentTrendPreJoiningDateAndIndexing:
         day_12 = next(item for item in items if item["date"] == "2026-10-12")
         assert day_12["headcount"] == 2
 
-    def test_trend_explain_uses_index_and_no_collscan(self, clean_db):
-        """Trend uses the indexed date and employee-code lookup at 100,000 records."""
+    def test_all_explain_plans_use_indexes_without_collscan_at_scale(self, clean_db):
+        """All five query plans use indexes on a 100,000 attendance-record fixture."""
         employee_count = 10_000
         db.employees.insert_many([
             {
@@ -831,14 +831,13 @@ class TestDepartmentTrendPreJoiningDateAndIndexing:
                 "date": f"2026-10-{day:02d}",
                 "status": "PRESENT",
                 "half_day": False,
-                "late_minutes": 0,
+                "late_minutes": 30 if index % 100 == 0 else 0,
+                "overtime_minutes": 0,
+                "work_hours": 8.0,
             }
             for index in range(employee_count)
             for day in range(1, 11)
         ])
-        res = clean_db.get("/admin/explain/department_trend?department=TestDept&from=2026-10-01&to=2026-10-09")
-        assert res.status_code == 200, res.text
-        explain_data = res.json()["explain"]
 
         def find_stages(obj):
             st = []
@@ -852,9 +851,24 @@ class TestDepartmentTrendPreJoiningDateAndIndexing:
                     st.extend(find_stages(v))
             return st
 
-        stages = find_stages(explain_data)
-        assert "IXSCAN" in stages, f"Expected IXSCAN in explain stages, got: {stages}"
-        assert "COLLSCAN" not in stages, f"COLLSCAN detected in explain stages: {stages}"
+        endpoints = (
+            "/admin/explain/attendance_list?status=PRESENT&date_from=2026-10-01&date_to=2026-10-09",
+            "/admin/explain/employee_monthly?emp_code=SCALE00000&month=2026-10",
+            "/admin/explain/department_summary?department=TestDept&month=2026-10",
+            "/admin/explain/late_leaderboard?department=TestDept&month=2026-10&limit=5",
+            "/admin/explain/department_trend?department=TestDept&from=2026-10-01&to=2026-10-09",
+        )
+        for endpoint in endpoints:
+            response = clean_db.get(endpoint)
+            assert response.status_code == 200, f"{endpoint}: {response.text}"
+            stages = find_stages(response.json()["explain"])
+            normalized_stages = {stage.upper() for stage in stages}
+            assert any("IXSCAN" in stage for stage in normalized_stages), (
+                f"Expected IXSCAN for {endpoint}, got: {sorted(normalized_stages)}"
+            )
+            assert not any("COLLSCAN" in stage for stage in normalized_stages), (
+                f"COLLSCAN detected for {endpoint}: {sorted(normalized_stages)}"
+            )
 
 
 # ===========================================================================

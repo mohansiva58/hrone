@@ -21,7 +21,7 @@ from pymongo.errors import DuplicateKeyError
 
 load_dotenv()
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI") or "mongodb://localhost:27017"
 MONGO_DB = os.getenv("MONGO_DB", "attendance_db")
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -680,6 +680,12 @@ class EmployeeIn(BaseModel):
         except ValueError:
             raise ValueError("joined_on is not a valid calendar date")
         return v
+
+    @model_validator(mode="after")
+    def validate_shift_times_differ(self):
+        if self.shift_start == self.shift_end:
+            raise ValueError("shift_start and shift_end must differ")
+        return self
 
 
 class PunchInIn(BaseModel):

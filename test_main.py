@@ -39,27 +39,10 @@ def test_create_and_list_employees(setup_db):
     assert data["emp_code"] == "EMP0001"
     assert isinstance(data["created_at"], int)
 
-    # Equal shift times represent a 24-hour overnight shift per the contract.
+    # The employee-creation contract requires distinct shift boundaries.
     equal_shift_emp = dict(emp_data, emp_code="EMP0009", shift_start="09:30", shift_end="09:30")
     res_equal = setup_db.post("/employees", json=equal_shift_emp)
-    assert res_equal.status_code == 201, res_equal.text
-
-    punch_in = datetime(2026, 7, 6, 4, 10, 1, tzinfo=timezone.utc)
-    punch_out = datetime(2026, 7, 7, 4, 0, 0, tzinfo=timezone.utc)
-    res_in = setup_db.post(
-        "/attendance/punch-in",
-        json={"emp_code": "EMP0009", "punched_at": int(punch_in.timestamp()) * 1000},
-    )
-    assert res_in.status_code == 201, res_in.text
-    assert res_in.json()["date"] == "2026-07-06"
-    assert res_in.json()["late_minutes"] == 10
-
-    res_out = setup_db.post(
-        "/attendance/punch-out",
-        json={"emp_code": "EMP0009", "punched_at": int(punch_out.timestamp()) * 1000},
-    )
-    assert res_out.status_code == 200, res_out.text
-    assert res_out.json()["work_hours"] == 23.83
+    assert res_equal.status_code == 422
 
     # Duplicate emp_code -> 409
     res_dup = setup_db.post("/employees", json=emp_data)
@@ -69,10 +52,9 @@ def test_create_and_list_employees(setup_db):
     res_list = setup_db.get("/employees")
     assert res_list.status_code == 200
     l_data = res_list.json()
-    assert l_data["total"] == 2
-    assert len(l_data["items"]) == 2
+    assert l_data["total"] == 1
+    assert len(l_data["items"]) == 1
     assert l_data["items"][0]["emp_code"] == "EMP0001"
-    assert l_data["items"][1]["emp_code"] == "EMP0009"
 
 def test_punch_in_type_validations(setup_db):
     emp_data = {

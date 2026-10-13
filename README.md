@@ -20,15 +20,21 @@ A FastAPI + MongoDB REST API for tracking daily employee attendance, computing a
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `MONGO_URI` | No | `mongodb://localhost:27017` | Full MongoDB connection string |
+| `MONGO_URI` | No | `mongodb://localhost:27017` | Full MongoDB connection string; takes precedence |
+| `MONGODB_URI` | No | — | Supported alias when `MONGO_URI` is unset |
 | `MONGO_DB` | No | `attendance_db` | Database name |
 
-Example configuration in `.env` (or set directly in the environment):
+Example local configuration in `.env` (or set directly in the environment):
 
 ```env
 MONGO_URI=mongodb://localhost:27017
 MONGO_DB=attendance_db
 ```
+
+For a cloud deployment, set `MONGODB_URI` (or `MONGO_URI`) to the provider's
+connection string and set `MONGO_DB` to the intended database. Keep credentials
+in the ignored `.env` or deployment secret store; never commit them. `MONGO_URI`
+takes precedence if both URI variables are set.
 
 ## Setup
 
@@ -109,7 +115,8 @@ local-only and are intentionally excluded from the public repository.
 | **R9** | **Headcount.** Employees with joined_on on or before the end of the period, whether or not they have any logs. |
 | **R10** | **Pagination.** page starts at 1; page_size default 20, max 100; total always reflects the filters. |
 
-Employee shifts with equal start and end times are valid 24-hour overnight shifts.
+Employee creation requires distinct shift boundaries. Existing records with equal
+times are still classified as overnight by the attendance-date helper.
 Attendance request bodies ignore supplied `work_hours`, `late_minutes`,
 `overtime_minutes`, and `half_day`; the API always computes these read-only fields.
 Unrelated unknown request fields and explicit nulls for non-nullable inputs remain
