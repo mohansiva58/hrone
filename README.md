@@ -131,4 +131,4 @@ invalid.
 - [x] `DECISIONS.md` — design decisions (150–200 words)
 - [x] All database indexes created at startup
 - [x] No `Dockerfile` committed
-- [x] Concurrency and compare-and-set optimistic locking implemented and verified
+- [x] Concurrency and compare-and-set locking implemented; validated by the local MongoDB integration suite.

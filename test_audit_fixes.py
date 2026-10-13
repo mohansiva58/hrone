@@ -851,6 +851,18 @@ class TestDepartmentTrendPreJoiningDateAndIndexing:
                     st.extend(find_stages(v))
             return st
 
+        def find_lookup_stats(obj):
+            stats = []
+            if isinstance(obj, dict):
+                if "$lookup" in obj and "collectionScans" in obj:
+                    stats.append(obj)
+                for value in obj.values():
+                    stats.extend(find_lookup_stats(value))
+            elif isinstance(obj, list):
+                for value in obj:
+                    stats.extend(find_lookup_stats(value))
+            return stats
+
         endpoints = (
             "/admin/explain/attendance_list?status=PRESENT&date_from=2026-10-01&date_to=2026-10-09",
             "/admin/explain/employee_monthly?emp_code=SCALE00000&month=2026-10",
@@ -869,6 +881,19 @@ class TestDepartmentTrendPreJoiningDateAndIndexing:
             assert not any("COLLSCAN" in stage for stage in normalized_stages), (
                 f"COLLSCAN detected for {endpoint}: {sorted(normalized_stages)}"
             )
+            if "department_trend" in endpoint:
+                lookup_stats = find_lookup_stats(response.json()["explain"])
+                assert lookup_stats, "Trend explain did not expose $lookup execution statistics"
+                lookup = lookup_stats[0]
+                assert lookup["collectionScans"] == 0, (
+                    f"Trend lookup performed collection scans: {lookup}"
+                )
+                assert any("emp_code" in index and "date" in index for index in lookup["indexesUsed"]), (
+                    f"Trend lookup did not use the employee/date index: {lookup}"
+                )
+                assert lookup["totalDocsExamined"] <= employee_count * 9, (
+                    f"Trend lookup examined more than the matching fixture records: {lookup}"
+                )
 
 
 # ===========================================================================

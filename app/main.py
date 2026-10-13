@@ -590,15 +590,12 @@ def _build_department_trend_pipeline(department: str, d_from: date, d_to: date) 
         }},
         {"$lookup": {
             "from": "attendance_logs",
-            "let": {"curr_date": "$date", "dept_emps": "$emp_codes"},
+            "localField": "emp_codes",
+            "foreignField": "emp_code",
+            "let": {"curr_date": "$date"},
             "pipeline": [
                 {"$match": {
-                    "$expr": {
-                        "$and": [
-                            {"$eq": ["$date", "$$curr_date"]},
-                            {"$in": ["$emp_code", "$$dept_emps"]}
-                        ]
-                    }
+                    "$expr": {"$eq": ["$date", "$$curr_date"]}
                 }}
             ],
             "as": "logs"
