@@ -1,0 +1,29 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+*.log
+.idea/
+.vscode/
+
+# Supplied assessment materials and local-only sample data
+sample_data/
+sample_seed.py
+PROBLEM_STATEMENT.docx
+openapi.yaml
+DATA_MODEL.md
+hrone_final_manager_review.md
+
+# Local MongoDB files and temporary tools
+.mongo/
+.tools/
+mongod.lock
+storage.bson
