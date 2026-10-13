@@ -33,6 +33,7 @@ def init_test_db():
     """Ensure indexes exist on test database."""
     test_db.employees.create_index([("emp_code", 1)], unique=True)
     test_db.employees.create_index([("department", 1), ("joined_on", 1), ("emp_code", 1)])
+    test_db.employees.create_index([("department", 1), ("emp_code", 1)])
     test_db.employees.create_index([("joined_on", 1)])
 
     test_db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)

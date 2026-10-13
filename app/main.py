@@ -39,7 +39,7 @@ def is_local_host(host_str: str) -> bool:
         address = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return address.is_loopback or address.is_unspecified
+    return address.is_loopback
 
 
 def verify_test_database_safety(mongo_uri: str, db_name: str) -> dict:
@@ -78,6 +78,7 @@ db = client[MONGO_DB]
 async def lifespan(app: FastAPI):
     db.employees.create_index([("emp_code", 1)], unique=True)
     db.employees.create_index([("department", 1), ("joined_on", 1), ("emp_code", 1)])
+    db.employees.create_index([("department", 1), ("emp_code", 1)])
     db.employees.create_index([("joined_on", 1)])
 
     db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
@@ -301,11 +302,11 @@ def format_attendance_doc(doc: dict) -> dict:
 # the identical query/aggregation — no simplified substitutes.
 # --------------------------------------------------------------------------- #
 
-def _build_employee_monthly_pipeline(emp_code: str, s_str: str, e_str: str) -> list:
+def _build_employee_monthly_pipeline(emp_code: str, s_str: str, e_str: str, joined_on: str) -> list:
     return [
         {"$match": {
             "emp_code": emp_code,
-            "date": {"$gte": s_str, "$lte": e_str}
+            "date": {"$gte": max(s_str, joined_on), "$lte": e_str}
         }},
         {"$addFields": {
             "dt": {"$dateFromString": {"dateString": "$date"}},
@@ -346,13 +347,14 @@ def _build_department_summary_pipeline(match_emp: dict, s_str: str, e_str: str) 
         {"$match": match_emp},
         {"$lookup": {
             "from": "attendance_logs",
-            "let": {"emp": "$emp_code"},
+            "let": {"emp": "$emp_code", "joined_on": "$joined_on"},
             "pipeline": [
                 {"$match": {
                     "$expr": {
                         "$and": [
                             {"$eq": ["$emp_code", "$$emp"]},
                             {"$gte": ["$date", s_str]},
+                            {"$gte": ["$date", "$$joined_on"]},
                             {"$lte": ["$date", e_str]}
                         ]
                     }
@@ -862,15 +864,14 @@ def punch_out(body: PunchOutIn):
     if doc.get("punch_out") is not None:
         raise HTTPException(409, "Already punched out")
 
-    punch_in_dt = doc["punch_in"]
-    if punch_in_dt.tzinfo is None:
-        punch_in_dt = punch_in_dt.replace(tzinfo=timezone.utc)
+    punch_in_dt = truncate_to_seconds(doc["punch_in"])
 
     diff_sec = (ts_utc - punch_in_dt).total_seconds()
     if diff_sec <= 0 or diff_sec > 86400:
         raise HTTPException(422, "Invalid punch-out time")
 
     wh = compute_work_hours(punch_in_dt, ts_utc)
+    late_min = compute_late_minutes(punch_in_dt, emp["shift_start"], doc["date"])
     ot = compute_overtime(ts_utc, emp["shift_start"], emp["shift_end"], doc["date"])
     hd = (wh < 4.50)
 
@@ -884,7 +885,9 @@ def punch_out(body: PunchOutIn):
     res = db.attendance_logs.find_one_and_update(
         cas_filter,
         {"$set": {
+            "punch_in": punch_in_dt,
             "punch_out": ts_utc,
+            "late_minutes": late_min,
             "work_hours": wh,
             "overtime_minutes": ot,
             "half_day": hd
@@ -968,15 +971,15 @@ def regularize_attendance(
         target_punch_in = ms_to_datetime_utc(body.punch_in)
     else:
         target_punch_in = doc.get("punch_in")
-        if isinstance(target_punch_in, datetime) and target_punch_in.tzinfo is None:
-            target_punch_in = target_punch_in.replace(tzinfo=timezone.utc)
+        if isinstance(target_punch_in, datetime):
+            target_punch_in = truncate_to_seconds(target_punch_in)
 
     if body.punch_out is not None:
         target_punch_out = ms_to_datetime_utc(body.punch_out)
     else:
         target_punch_out = doc.get("punch_out")
-        if isinstance(target_punch_out, datetime) and target_punch_out.tzinfo is None:
-            target_punch_out = target_punch_out.replace(tzinfo=timezone.utc)
+        if isinstance(target_punch_out, datetime):
+            target_punch_out = truncate_to_seconds(target_punch_out)
 
     if target_status in ("ABSENT", "LEAVE"):
         if body.punch_in is not None or body.punch_out is not None:
@@ -1108,7 +1111,7 @@ def employee_monthly(
 
     w_days = count_working_days(start_date, end_date, emp["joined_on"])
 
-    pipeline = _build_employee_monthly_pipeline(emp_code, s_str, e_str)
+    pipeline = _build_employee_monthly_pipeline(emp_code, s_str, e_str, emp["joined_on"])
     res = list(db.attendance_logs.aggregate(pipeline))
 
     if res:
@@ -1298,8 +1301,17 @@ def explain_endpoint(
         if not emp_code or not month:
             raise HTTPException(422, "emp_code and month are required for employee_monthly")
 
+        emp = db.employees.find_one({"emp_code": emp_code})
+        if not emp:
+            raise HTTPException(404, "Employee not found")
+
         start_date, end_date = get_month_range(month)
-        pipeline = _build_employee_monthly_pipeline(emp_code, start_date.isoformat(), end_date.isoformat())
+        pipeline = _build_employee_monthly_pipeline(
+            emp_code,
+            start_date.isoformat(),
+            end_date.isoformat(),
+            emp["joined_on"],
+        )
         cmd = {"aggregate": "attendance_logs", "pipeline": pipeline, "cursor": {}}
         res = db.command("explain", cmd, verbosity="executionStats")
         return {"endpoint": endpoint, "collection": "attendance_logs", "explain": clean_bson(res)}

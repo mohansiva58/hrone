@@ -1,6 +1,6 @@
 # DECISIONS.md
 
-1. **Indexes:** On employees, unique `{emp_code:1}` enforces identity; `{department:1,joined_on:1,emp_code:1}` supports department and join-date filtering; `{joined_on:1}` serves headcount queries without a department filter. On attendance_logs, unique `{emp_code:1,date:1}` enforces one daily record and supports employee/month queries; `{date:-1,emp_code:1}` supports list ordering; `{date:1,emp_code:1}` supports date-correlated trend lookups; `{date:1,late_minutes:1}` narrows leaderboard candidates; `{emp_code:1,date:1,status:1}` supports combined filters.
+1. **Indexes:** Employees use unique `{emp_code:1}` for identity, `{department:1,joined_on:1,emp_code:1}` for department/join-date filtering, `{department:1,emp_code:1}` for filtered sorting, and `{joined_on:1}` for global headcount. Attendance uses unique `{emp_code:1,date:1}` for daily identity and employee/month queries; `{date:-1,emp_code:1}` for list ordering; `{date:1,emp_code:1}` for trend lookups; `{date:1,late_minutes:1}` for leaderboard candidates; and `{emp_code:1,date:1,status:1}` for combined filters.
 
 2. **Punch-in race:** The unique compound index is the authority. Exactly one insert wins; competitors receive `DuplicateKeyError`, mapped to 409. A pre-check alone cannot prevent a race.
 

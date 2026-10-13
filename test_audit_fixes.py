@@ -519,6 +519,10 @@ class TestAnalyticsBusinessResults:
         _insert_analytics_log("EMP1001", "2026-07-08", status="LEAVE", work_hours=20.0)
         _insert_analytics_log("EMP1001", "2026-07-09", work_hours=None)
         _insert_analytics_log("EMP1002", "2026-07-13", status="WFH", work_hours=8.0)
+        _insert_analytics_log(
+            "EMP1002", "2026-07-06", work_hours=12.0,
+            late_minutes=77, overtime_minutes=23,
+        )
 
         response = clean_db.get("/analytics/departments/summary?month=2026-07&department=SummaryDept")
         assert response.status_code == 200, response.text
@@ -537,6 +541,22 @@ class TestAnalyticsBusinessResults:
         assert monthly_data["late_count"] == 1
         assert monthly_data["total_late_minutes"] == 35
         assert monthly_data["total_overtime_minutes"] == 45
+
+        pre_join_monthly = clean_db.get(
+            "/analytics/employees/EMP1002/monthly?month=2026-07"
+        )
+        assert pre_join_monthly.status_code == 200, pre_join_monthly.text
+        pre_join_data = pre_join_monthly.json()
+        assert pre_join_data["present_days"] == 1.0
+        assert pre_join_data["late_count"] == 0
+        assert pre_join_data["total_late_minutes"] == 0
+        assert pre_join_data["total_overtime_minutes"] == 0
+
+        no_logs_monthly = clean_db.get(
+            "/analytics/employees/EMP1004/monthly?month=2026-07"
+        )
+        assert no_logs_monthly.status_code == 200, no_logs_monthly.text
+        assert no_logs_monthly.json()["present_days"] == 0.0
 
     def test_leaderboard_includes_all_ties_at_limit_in_employee_order(self, clean_db):
         """All employees tied at rank=limit are returned, ordered by employee code."""
@@ -1017,6 +1037,16 @@ class TestDatabaseSafetyAndImportGuards:
         with pytest.raises(ValueError, match="only local MongoDB hosts"):
             verify_test_database_safety("mongodb://cluster0.mongodb.net:27017", "test_db")
 
+    def test_safety_guard_rejects_unspecified_ip_hosts(self):
+        """Wildcard bind addresses are not safe destinations for destructive tests."""
+        from app.main import verify_test_database_safety
+        for uri in (
+            "mongodb://0.0.0.0:27017",
+            "mongodb://[::]:27017",
+        ):
+            with pytest.raises(ValueError, match="only local MongoDB hosts"):
+                verify_test_database_safety(uri, "test_db")
+
     def test_safety_guard_rejects_srv_uri(self):
         """SRV URIs are rejected without resolving or contacting their remote host."""
         from app.main import verify_test_database_safety
@@ -1034,3 +1064,111 @@ class TestDatabaseSafetyAndImportGuards:
             info = verify_test_database_safety(uri, "test_attendance_db")
             assert info["host_category"] == "LOCAL_DISPOSABLE"
             assert info["database"] == "test_attendance_db"
+
+
+class TestLegacyFractionalPunchTimestamps:
+    def test_punch_out_truncates_legacy_fractional_punch_in(self, clean_db):
+        _create_emp(clean_db)
+        punch_in = _utc(2026, 7, 6, 9, 40, 0) + timedelta(milliseconds=500)
+        db.attendance_logs.insert_one({
+            "emp_code": "EMP0050",
+            "date": "2026-07-06",
+            "status": "PRESENT",
+            "punch_in": punch_in,
+            "punch_out": None,
+            "work_hours": None,
+            "late_minutes": 10,
+            "overtime_minutes": 0,
+            "half_day": False,
+        })
+
+        response = clean_db.post(
+            "/attendance/punch-out",
+            json={"emp_code": "EMP0050", "punched_at": _ts(_utc(2026, 7, 6, 18, 30))},
+        )
+
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["punch_in"] == _ts(_utc(2026, 7, 6, 9, 40))
+        assert result["late_minutes"] == 0
+        assert result["work_hours"] == 8.83
+        stored = db.attendance_logs.find_one({"emp_code": "EMP0050", "date": "2026-07-06"})
+        assert stored["punch_in"].microsecond == 0
+
+    def test_regularization_truncates_legacy_fractional_punch_times(self, clean_db):
+        _create_emp(clean_db)
+        punch_in = _utc(2026, 7, 6, 9, 40, 0) + timedelta(milliseconds=500)
+        punch_out = _utc(2026, 7, 6, 18, 30, 0) + timedelta(milliseconds=500)
+        db.attendance_logs.insert_one({
+            "emp_code": "EMP0050",
+            "date": "2026-07-06",
+            "status": "PRESENT",
+            "punch_in": punch_in,
+            "punch_out": punch_out,
+            "work_hours": 8.83,
+            "late_minutes": 10,
+            "overtime_minutes": 0,
+            "half_day": False,
+            "history": [],
+        })
+
+        response = clean_db.patch(
+            "/attendance/EMP0050/2026-07-06",
+            json={
+                "status": "WFH",
+                "reason": "Normalize legacy timestamps",
+                "regularized_by": "hr.admin",
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["punch_in"] == _ts(_utc(2026, 7, 6, 9, 40))
+        assert result["punch_out"] == _ts(_utc(2026, 7, 6, 18, 30))
+        assert result["late_minutes"] == 0
+        assert result["work_hours"] == 8.83
+        stored = db.attendance_logs.find_one({"emp_code": "EMP0050", "date": "2026-07-06"})
+        assert stored["punch_in"].microsecond == 0
+        assert stored["punch_out"].microsecond == 0
+
+
+class TestDocumentedPunchDurationLimit:
+    def test_punch_out_rejects_more_than_24_hours(self, clean_db):
+        _create_emp(clean_db)
+        _punch_in(clean_db, "EMP0050", 9, 30)
+
+        response = clean_db.post(
+            "/attendance/punch-out",
+            json={
+                "emp_code": "EMP0050",
+                "punched_at": _ts(_utc(2026, 7, 7, 9, 30, 1)),
+            },
+        )
+
+        assert response.status_code == 422
+
+    def test_regularization_rejects_more_than_24_hours(self, clean_db):
+        _create_emp(clean_db)
+        db.attendance_logs.insert_one({
+            "emp_code": "EMP0050",
+            "date": "2026-07-06",
+            "status": "PRESENT",
+            "punch_in": _utc(2026, 7, 6, 9, 30),
+            "punch_out": _utc(2026, 7, 7, 9, 30, 1),
+            "work_hours": 24.0,
+            "late_minutes": 0,
+            "overtime_minutes": 0,
+            "half_day": False,
+            "history": [],
+        })
+
+        response = clean_db.patch(
+            "/attendance/EMP0050/2026-07-06",
+            json={
+                "status": "WFH",
+                "reason": "Validate documented duration limit",
+                "regularized_by": "hr.admin",
+            },
+        )
+
+        assert response.status_code == 422

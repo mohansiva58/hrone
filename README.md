@@ -59,6 +59,9 @@ uvicorn app.main:app --port 8000
 ```
 
 Interactive OpenAPI documentation is available at: `http://localhost:8000/docs`
+Startup creates the required indexes and fails if MongoDB is unavailable or index
+creation fails; `/health` is available after successful startup and reports MongoDB
+connectivity.
 
 ## Running tests
 
