@@ -9,7 +9,7 @@ import json
 import math
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from bson import json_util
 from dotenv import load_dotenv
@@ -765,10 +765,143 @@ class RegularizeIn(BaseModel):
         return v
 
 
+class ErrorResponse(BaseModel):
+    detail: str
+
+
+class ValidationErrorResponse(BaseModel):
+    detail: List[Dict[str, Any]]
+
+
+class HealthOut(BaseModel):
+    status: Literal["ok"]
+
+
+class EmployeeOut(BaseModel):
+    emp_code: str
+    name: str
+    email: str
+    department: str
+    shift_start: str
+    shift_end: str
+    joined_on: str
+    created_at: int
+
+
+class EmployeePageOut(BaseModel):
+    items: List[EmployeeOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class HistoryChangeOut(BaseModel):
+    from_: Any = Field(alias="from")
+    to: Any
+
+    model_config = {"populate_by_name": True}
+
+
+class HistoryEntryOut(BaseModel):
+    at: int
+    by: str
+    reason: str
+    changes: Dict[str, HistoryChangeOut]
+
+
+class AttendanceRecordOut(BaseModel):
+    emp_code: str
+    date: str
+    status: Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"]
+    punch_in: Optional[int]
+    punch_out: Optional[int]
+    work_hours: Optional[float]
+    late_minutes: int
+    overtime_minutes: int
+    half_day: bool
+    history: List[HistoryEntryOut]
+
+
+class AttendancePageOut(BaseModel):
+    items: List[AttendanceRecordOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class EmployeeMonthlyOut(BaseModel):
+    emp_code: str
+    month: str
+    working_days: int
+    present_days: float
+    leave_days: int
+    late_count: int
+    total_late_minutes: int
+    total_overtime_minutes: int
+    attendance_pct: Optional[float]
+
+
+class DepartmentSummaryItemOut(BaseModel):
+    department: str
+    headcount: int
+    present_days: float
+    avg_work_hours: Optional[float]
+    late_count: int
+    total_late_minutes: int
+    leave_count: int
+    on_duty_count: int
+
+
+class DepartmentSummaryOut(BaseModel):
+    month: str
+    items: List[DepartmentSummaryItemOut]
+
+
+class LeaderboardItemOut(BaseModel):
+    rank: int = Field(ge=1)
+    emp_code: str
+    name: str
+    department: str
+    total_late_minutes: int
+    late_count: int
+
+
+class LeaderboardOut(BaseModel):
+    month: str
+    items: List[LeaderboardItemOut]
+
+
+class TrendItemOut(BaseModel):
+    date: str
+    is_working_day: bool
+    headcount: int
+    present_count: float
+    late_count: int
+    attendance_rate: Optional[float]
+    moving_avg_7d: Optional[float]
+
+
+class TrendOut(BaseModel):
+    department: str
+    items: List[TrendItemOut]
+
+
+class ExplainOut(BaseModel):
+    endpoint: str
+    collection: str
+    explain: Dict[str, Any]
+
+
+ERROR_404 = {404: {"model": ErrorResponse, "description": "Error"}}
+ERROR_409 = {409: {"model": ErrorResponse, "description": "Error"}}
+ERROR_422 = {422: {"model": ValidationErrorResponse, "description": "Validation error"}}
+ERROR_503 = {503: {"model": ErrorResponse, "description": "Error"}}
+
+
 # --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
-@app.get("/health")
+@app.get("/health", response_model=HealthOut, responses={**ERROR_503})
 def health():
     try:
         db.command("ping")
@@ -777,7 +910,7 @@ def health():
         raise HTTPException(503, "MongoDB unavailable")
 
 
-@app.post("/employees", status_code=201)
+@app.post("/employees", status_code=201, response_model=EmployeeOut, responses={**ERROR_409, **ERROR_422})
 def create_employee(body: EmployeeIn):
     doc = body.model_dump()
     now_utc = truncate_to_seconds(datetime.now(timezone.utc))
@@ -791,7 +924,7 @@ def create_employee(body: EmployeeIn):
     return format_employee_doc(doc)
 
 
-@app.get("/employees")
+@app.get("/employees", response_model=EmployeePageOut, responses={**ERROR_422})
 def list_employees(
     department: Optional[str] = None,
     page: int = Query(1, ge=1),
@@ -807,7 +940,12 @@ def list_employees(
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
-@app.post("/attendance/punch-in", status_code=201)
+@app.post(
+    "/attendance/punch-in",
+    status_code=201,
+    response_model=AttendanceRecordOut,
+    responses={**ERROR_404, **ERROR_409, **ERROR_422},
+)
 def punch_in(body: PunchInIn):
     emp = db.employees.find_one({"emp_code": body.emp_code})
     if not emp:
@@ -842,7 +980,12 @@ def punch_in(body: PunchInIn):
     return format_attendance_doc(doc)
 
 
-@app.post("/attendance/punch-out", status_code=200)
+@app.post(
+    "/attendance/punch-out",
+    status_code=200,
+    response_model=AttendanceRecordOut,
+    responses={**ERROR_404, **ERROR_409, **ERROR_422},
+)
 def punch_out(body: PunchOutIn):
     emp = db.employees.find_one({"emp_code": body.emp_code})
     if not emp:
@@ -901,7 +1044,7 @@ def punch_out(body: PunchOutIn):
     return format_attendance_doc(res)
 
 
-@app.get("/attendance")
+@app.get("/attendance", response_model=AttendancePageOut, responses={**ERROR_422})
 def list_attendance(
     emp_code: Optional[str] = None,
     date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
@@ -945,7 +1088,11 @@ def list_attendance(
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
-@app.patch("/attendance/{emp_code}/{date}")
+@app.patch(
+    "/attendance/{emp_code}/{date}",
+    response_model=AttendanceRecordOut,
+    responses={**ERROR_404, **ERROR_409, **ERROR_422},
+)
 def regularize_attendance(
     emp_code: str,
     date_param: str = Path(..., alias="date", pattern=r"^\d{4}-\d{2}-\d{2}$"),
@@ -1020,14 +1167,14 @@ def regularize_attendance(
         changes["status"] = {"from": doc.get("status"), "to": target_status}
 
     old_pi = doc.get("punch_in")
-    if isinstance(old_pi, datetime) and old_pi.tzinfo is None:
-        old_pi = old_pi.replace(tzinfo=timezone.utc)
+    if isinstance(old_pi, datetime):
+        old_pi = truncate_to_seconds(old_pi)
     if old_pi != target_punch_in:
         changes["punch_in"] = {"from": old_pi, "to": target_punch_in}
 
     old_po = doc.get("punch_out")
-    if isinstance(old_po, datetime) and old_po.tzinfo is None:
-        old_po = old_po.replace(tzinfo=timezone.utc)
+    if isinstance(old_po, datetime):
+        old_po = truncate_to_seconds(old_po)
     if old_po != target_punch_out:
         changes["punch_out"] = {"from": old_po, "to": target_punch_out}
 
@@ -1096,7 +1243,11 @@ def regularize_attendance(
     return format_attendance_doc(res)
 
 
-@app.get("/analytics/employees/{emp_code}/monthly")
+@app.get(
+    "/analytics/employees/{emp_code}/monthly",
+    response_model=EmployeeMonthlyOut,
+    responses={**ERROR_404, **ERROR_422},
+)
 def employee_monthly(
     emp_code: str,
     month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -1146,7 +1297,7 @@ def employee_monthly(
     }
 
 
-@app.get("/analytics/departments/summary")
+@app.get("/analytics/departments/summary", response_model=DepartmentSummaryOut, responses={**ERROR_422})
 def department_summary(
     month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
     department: Optional[str] = None
@@ -1179,7 +1330,7 @@ def department_summary(
     return {"month": month, "items": items}
 
 
-@app.get("/analytics/leaderboard/late")
+@app.get("/analytics/leaderboard/late", response_model=LeaderboardOut, responses={**ERROR_422})
 def late_leaderboard(
     month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
     limit: int = Query(10, ge=1, le=50),
@@ -1205,7 +1356,11 @@ def late_leaderboard(
     return {"month": month, "items": items}
 
 
-@app.get("/analytics/departments/{department}/trend")
+@app.get(
+    "/analytics/departments/{department}/trend",
+    response_model=TrendOut,
+    responses={**ERROR_404, **ERROR_422},
+)
 def department_trend(
     department: str = Path(...),
     from_date_str: str = Query(..., alias="from", pattern=r"^\d{4}-\d{2}-\d{2}$"),
@@ -1252,7 +1407,7 @@ def department_trend(
     return {"department": department, "items": items}
 
 
-@app.get("/admin/explain/{endpoint}")
+@app.get("/admin/explain/{endpoint}", response_model=ExplainOut, responses={**ERROR_422})
 def explain_endpoint(
     endpoint: str = Path(..., pattern=r"^(attendance_list|employee_monthly|department_summary|late_leaderboard|department_trend)$"),
     emp_code: Optional[str] = None,

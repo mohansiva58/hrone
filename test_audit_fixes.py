@@ -1116,6 +1116,8 @@ class TestLegacyFractionalPunchTimestamps:
             "/attendance/EMP0050/2026-07-06",
             json={
                 "status": "WFH",
+                "punch_in": _ts(_utc(2026, 7, 6, 9, 41)),
+                "punch_out": _ts(_utc(2026, 7, 6, 18, 31)),
                 "reason": "Normalize legacy timestamps",
                 "regularized_by": "hr.admin",
             },
@@ -1123,13 +1125,21 @@ class TestLegacyFractionalPunchTimestamps:
 
         assert response.status_code == 200, response.text
         result = response.json()
-        assert result["punch_in"] == _ts(_utc(2026, 7, 6, 9, 40))
-        assert result["punch_out"] == _ts(_utc(2026, 7, 6, 18, 30))
-        assert result["late_minutes"] == 0
+        assert result["punch_in"] == _ts(_utc(2026, 7, 6, 9, 41))
+        assert result["punch_out"] == _ts(_utc(2026, 7, 6, 18, 31))
+        assert result["late_minutes"] == 11
         assert result["work_hours"] == 8.83
         stored = db.attendance_logs.find_one({"emp_code": "EMP0050", "date": "2026-07-06"})
         assert stored["punch_in"].microsecond == 0
         assert stored["punch_out"].microsecond == 0
+        history = stored["history"][0]
+        assert history["at"].microsecond == 0
+        assert history["changes"]["punch_in"]["from"].microsecond == 0
+        assert history["changes"]["punch_out"]["from"].microsecond == 0
+        assert result["history"][0]["changes"]["punch_in"]["from"] == _ts(_utc(2026, 7, 6, 9, 40))
+        assert result["history"][0]["changes"]["punch_out"]["from"] == _ts(_utc(2026, 7, 6, 18, 30))
+        assert result["history"][0]["changes"]["punch_in"]["to"] == _ts(_utc(2026, 7, 6, 9, 41))
+        assert result["history"][0]["changes"]["punch_out"]["to"] == _ts(_utc(2026, 7, 6, 18, 31))
 
 
 class TestDocumentedPunchDurationLimit:
@@ -1172,3 +1182,48 @@ class TestDocumentedPunchDurationLimit:
         )
 
         assert response.status_code == 422
+
+
+class TestGeneratedOpenApiContract:
+    def test_success_schemas_and_error_responses_are_documented(self):
+        schema = app.openapi()
+        expected_responses = {
+            ("/health", "get"): {"200", "503"},
+            ("/employees", "post"): {"201", "409", "422"},
+            ("/employees", "get"): {"200", "422"},
+            ("/attendance/punch-in", "post"): {"201", "404", "409", "422"},
+            ("/attendance/punch-out", "post"): {"200", "404", "409", "422"},
+            ("/attendance", "get"): {"200", "422"},
+            ("/attendance/{emp_code}/{date}", "patch"): {"200", "404", "409", "422"},
+            ("/analytics/employees/{emp_code}/monthly", "get"): {"200", "404", "422"},
+            ("/analytics/departments/summary", "get"): {"200", "422"},
+            ("/analytics/leaderboard/late", "get"): {"200", "422"},
+            ("/analytics/departments/{department}/trend", "get"): {"200", "404", "422"},
+            ("/admin/explain/{endpoint}", "get"): {"200", "422"},
+        }
+
+        for (path, method), codes in expected_responses.items():
+            documented = set(schema["paths"][path][method]["responses"])
+            assert codes.issubset(documented), f"{method.upper()} {path}: missing {codes - documented}"
+
+        components = schema["components"]["schemas"]
+        attendance_props = components["AttendanceRecordOut"]["properties"]
+        for field in (
+            "emp_code",
+            "date",
+            "status",
+            "punch_in",
+            "punch_out",
+            "work_hours",
+            "late_minutes",
+            "overtime_minutes",
+            "half_day",
+            "history",
+        ):
+            assert field in attendance_props
+
+        employee_page_props = components["EmployeePageOut"]["properties"]
+        assert {"items", "total", "page", "page_size"}.issubset(employee_page_props)
+
+        explain_props = components["ExplainOut"]["properties"]
+        assert {"endpoint", "collection", "explain"}.issubset(explain_props)
