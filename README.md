@@ -25,7 +25,7 @@ $env:TEST_MONGO_DB = "test_attendance_db"
 pytest -v
 ```
 
-The harness rejects missing opt-in, non-Atlas URIs, non-test database names, and the runtime database. There is no local MongoDB fallback. Atlas network access and database-user permissions must allow this machine to connect.
+The harness rejects missing opt-in, non-Atlas URIs, any test database other than `test_attendance_db`, and attempts to use the runtime database. Destructive fixtures operate only on `test_attendance_db`. There is no local MongoDB fallback. The Atlas database user must have the required permissions, and the cluster must allow connections from this machine.
 
 ## Notes
 

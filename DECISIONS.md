@@ -8,6 +8,6 @@
 
 4. **Headcount:** Department summary starts from eligible employees, not logs. Eligibility is `joined_on <= month end`; lookup with preserved empty arrays keeps employees with no logs.
 
-5. **Scaling:** For 10M logs, benchmark explains and latency first. If aggregations are slow, add reconciled daily summaries with freshness checks; partition only after measuring shard keys and query patterns.
+5. **Scaling:** For 10M attendance logs, benchmark aggregation explain plans and end-to-end latency first. If aggregations are slow, consider reconciled daily summary collections with freshness checks. Consider sharding only after measuring workload patterns and evaluating shard keys.
 
-6. **Database configuration and tests:** Runtime requires an Atlas SRV URI and defaults to `attendance_db`; it never silently connects to a local server. Destructive pytest runs require `ALLOW_ATLAS_TESTS=1` and always select a separate `test_` database (default `test_attendance_db`). The suite reuses the configured Atlas URI only after that explicit opt-in.
+6. **Database configuration and tests:** Runtime requires an Atlas SRV URI and defaults to `attendance_db`; it never silently connects to a local server. Destructive pytest runs require `ALLOW_ATLAS_TESTS=1` and are restricted to the dedicated `test_attendance_db` database. The test harness uses `TEST_MONGO_URI` when explicitly configured; otherwise, it reuses the configured Atlas URI after the required safety checks.
