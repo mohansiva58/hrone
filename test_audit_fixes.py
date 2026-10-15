@@ -41,7 +41,7 @@ def _utc(year, month, day, hour, minute, second=0) -> datetime:
 # --------------------------------------------------------------------------- #
 @pytest.fixture(autouse=True)
 def clean_db():
-    assert "test" in db.name.lower(), f"Refusing to run destructive operations against non-test database: '{db.name}'"
+    assert db.name == "test_attendance_db", f"Refusing to run destructive operations against unexpected database: '{db.name}'"
     db.employees.delete_many({})
     db.attendance_logs.delete_many({})
     with TestClient(app) as tc:
@@ -1026,44 +1026,51 @@ class TestDatabaseSafetyAndImportGuards:
     """
 
     def test_safety_guard_rejects_production_db_name(self):
-        """Refuses destructive execution if database name is 'attendance_db'."""
+        """Refuses destructive execution if database name is not test-prefixed."""
         from app.main import verify_test_database_safety
-        with pytest.raises(ValueError, match="not an approved disposable test database"):
-            verify_test_database_safety("mongodb://127.0.0.1:27017", "attendance_db")
+        with pytest.raises(ValueError, match="ALLOW_ATLAS_TESTS=1"):
+            verify_test_database_safety("mongodb+srv://cluster0.mongodb.net", "attendance_db", "")
 
-    def test_safety_guard_rejects_remote_atlas_host(self):
-        """Refuses destructive execution if host is remote or Atlas."""
+    def test_safety_guard_requires_explicit_opt_in(self):
         from app.main import verify_test_database_safety
-        with pytest.raises(ValueError, match="only local MongoDB hosts"):
-            verify_test_database_safety("mongodb://cluster0.mongodb.net:27017", "test_db")
+        with pytest.raises(ValueError, match="ALLOW_ATLAS_TESTS=1"):
+            verify_test_database_safety("mongodb+srv://cluster0.mongodb.net", "test_attendance_db")
 
-    def test_safety_guard_rejects_unspecified_ip_hosts(self):
-        """Wildcard bind addresses are not safe destinations for destructive tests."""
+    def test_safety_guard_rejects_invalid_test_database_names(self):
         from app.main import verify_test_database_safety
-        for uri in (
-            "mongodb://0.0.0.0:27017",
-            "mongodb://[::]:27017",
-        ):
-            with pytest.raises(ValueError, match="only local MongoDB hosts"):
-                verify_test_database_safety(uri, "test_db")
+        with pytest.raises(ValueError, match="begin with 'test_'"):
+            verify_test_database_safety("mongodb+srv://cluster0.mongodb.net", "attendance_db", "1")
 
-    def test_safety_guard_rejects_srv_uri(self):
-        """SRV URIs are rejected without resolving or contacting their remote host."""
+    def test_safety_guard_rejects_production_database(self, monkeypatch):
         from app.main import verify_test_database_safety
-        with pytest.raises(ValueError, match="explicit local mongodb"):
-            verify_test_database_safety("mongodb+srv://cluster0.mongodb.net", "test_db")
+        monkeypatch.setenv("MONGO_DB", "attendance_db")
+        with pytest.raises(ValueError, match="cannot equal the runtime database"):
+            verify_test_database_safety("mongodb+srv://cluster0.mongodb.net", "attendance_db", "1")
 
-    def test_safety_guard_approves_local_test_db(self):
-        """Approves loopback IPv4, IPv6, and the explicit Docker Desktop host."""
+    def test_safety_guard_rejects_invalid_uri_and_local_fallback(self):
         from app.main import verify_test_database_safety
-        for uri in (
-            "mongodb://127.0.0.1:27017",
-            "mongodb://[::1]:27017",
-            "mongodb://host.docker.internal:27017",
-        ):
-            info = verify_test_database_safety(uri, "test_attendance_db")
-            assert info["host_category"] == "LOCAL_DISPOSABLE"
-            assert info["database"] == "test_attendance_db"
+        with pytest.raises(ValueError, match="URI is invalid"):
+            verify_test_database_safety("not-a-mongodb-uri", "test_attendance_db", "1")
+        with pytest.raises(ValueError, match="Atlas SRV"):
+            verify_test_database_safety("mongodb://127.0.0.1:27017", "test_attendance_db", "1")
+        with pytest.raises(ValueError, match="URI is missing"):
+            verify_test_database_safety(None, "test_attendance_db", "1")
+
+    def test_runtime_uri_validation_rejects_missing_or_local_uri(self):
+        from app.main import validate_atlas_uri
+        with pytest.raises(ValueError, match="configuration is missing"):
+            validate_atlas_uri(None)
+        with pytest.raises(ValueError, match="must use an Atlas"):
+            validate_atlas_uri("mongodb://127.0.0.1:27017")
+
+    def test_safety_guard_accepts_atlas_test_database(self, monkeypatch):
+        from app.main import verify_test_database_safety
+        monkeypatch.setenv("MONGO_DB", "attendance_db")
+        info = verify_test_database_safety(
+            "mongodb+srv://cluster0.mongodb.net", "test_attendance_db", "1"
+        )
+        assert info["host_category"] == "ATLAS_TEST"
+        assert info["database"] == "test_attendance_db"
 
 
 class TestLegacyFractionalPunchTimestamps:

@@ -12,7 +12,7 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def setup_db():
-    assert "test" in db.name.lower(), f"Refusing to run destructive operations against non-test database: '{db.name}'"
+    assert db.name == "test_attendance_db", f"Refusing to run destructive operations against unexpected database: '{db.name}'"
     db.employees.delete_many({})
     db.attendance_logs.delete_many({})
     with TestClient(app) as tc:

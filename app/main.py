@@ -4,12 +4,12 @@ Employee Attendance & Analytics API - Fully Implemented
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
-import ipaddress
 import json
 import math
 import os
 import re
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlsplit
 
 from bson import json_util
 from dotenv import load_dotenv
@@ -21,8 +21,23 @@ from pymongo.errors import DuplicateKeyError
 
 load_dotenv()
 
-MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI") or "mongodb://localhost:27017"
+MONGO_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 MONGO_DB = os.getenv("MONGO_DB", "attendance_db")
+
+
+def validate_atlas_uri(mongo_uri: str) -> None:
+    """Validate Atlas SRV configuration without including credentials in errors."""
+    if not isinstance(mongo_uri, str) or not mongo_uri.strip():
+        raise ValueError("MongoDB configuration is missing; set MONGODB_URI to an Atlas SRV URI.")
+    if not mongo_uri.lower().startswith("mongodb+srv://"):
+        raise ValueError("MongoDB configuration must use an Atlas mongodb+srv:// URI.")
+    try:
+        pymongo.uri_parser.parse_uri(mongo_uri)
+    except (ValueError, pymongo.errors.ConfigurationError) as exc:
+        raise ValueError("MongoDB configuration contains an invalid Atlas URI.") from exc
+
+
+validate_atlas_uri(MONGO_URI)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -30,63 +45,72 @@ VALID_ALL_STATUSES = frozenset({"PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"})
 VALID_PUNCH_STATUSES = frozenset({"PRESENT", "WFH", "ON_DUTY"})
 DERIVED_ATTENDANCE_FIELDS = frozenset({"work_hours", "late_minutes", "overtime_minutes", "half_day"})
 
-def is_local_host(host_str: str) -> bool:
-    """Return True only for loopback hosts and explicit local Docker hostnames."""
-    host = host_str.lower().strip().strip("[]")
-    if host in {"localhost", "host.docker.internal"}:
-        return True
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return address.is_loopback
-
-
-def verify_test_database_safety(mongo_uri: str, db_name: str) -> dict:
+def verify_test_database_safety(mongo_uri: str, db_name: str, allow_atlas_tests: str = "") -> dict:
     """
     Validate a MongoDB URI and database name before opening a destructive client.
     """
-    if not isinstance(db_name, str) or not (
-        db_name.lower() == "test" or db_name.lower().startswith("test_")
-    ):
-        raise ValueError(
-            f"Safety check failed: Database name '{db_name}' is not an approved disposable test database."
-        )
-
-    if not isinstance(mongo_uri, str) or mongo_uri.lower().startswith("mongodb+srv://"):
-        raise ValueError("Safety check failed: only explicit local mongodb:// URIs are allowed.")
+    if allow_atlas_tests != "1":
+        raise ValueError("Safety check failed: set ALLOW_ATLAS_TESTS=1 to enable destructive Atlas tests.")
+    if not isinstance(mongo_uri, str) or not mongo_uri.strip():
+        raise ValueError("Safety check failed: MongoDB URI is missing.")
+    is_atlas_srv = mongo_uri.lower().startswith("mongodb+srv://")
+    # Validate SRV URI syntax here; the actual client connection performs DNS resolution.
+    parseable_uri = (
+        f"mongodb://{mongo_uri[len('mongodb+srv://'):]}"
+        if is_atlas_srv
+        else mongo_uri
+    )
     try:
-        parsed_uri = pymongo.uri_parser.parse_uri(mongo_uri)
+        parsed_uri = pymongo.uri_parser.parse_uri(parseable_uri)
+        srv_parts = urlsplit(mongo_uri) if is_atlas_srv else None
+        srv_port = srv_parts.port if srv_parts else None
     except (ValueError, pymongo.errors.ConfigurationError) as exc:
         raise ValueError("Safety check failed: MongoDB URI is invalid.") from exc
+    if (
+        not is_atlas_srv
+        or not parsed_uri.get("nodelist")
+        or len(parsed_uri["nodelist"]) != 1
+        or srv_parts is None
+        or srv_port is not None
+        or "," in srv_parts.netloc.rsplit("@", 1)[-1]
+    ):
+        raise ValueError("Safety check failed: test URI must target an Atlas SRV deployment.")
+    if db_name == os.getenv("MONGO_DB", "attendance_db"):
+        raise ValueError("Safety check failed: test database cannot equal the runtime database.")
+    if not isinstance(db_name, str) or not db_name.startswith("test_"):
+        raise ValueError("Safety check failed: database name must begin with 'test_'.")
+    uri_database = parsed_uri.get("database")
+    if uri_database and uri_database != db_name:
+        raise ValueError("Safety check failed: URI database must match the dedicated test database.")
+    return {"host_category": "ATLAS_TEST", "database": db_name}
 
-    nodes = parsed_uri.get("nodelist", [])
-    if not nodes or any(not is_local_host(host) for host, _ in nodes):
-        raise ValueError("Safety check failed: only local MongoDB hosts are allowed.")
 
-    return {"host_category": "LOCAL_DISPOSABLE", "database": db_name}
-
-
-if os.getenv("TEST_MODE") == "1":
-    verify_test_database_safety(MONGO_URI, MONGO_DB)
-
-client = MongoClient(MONGO_URI, connect=False)
+client = MongoClient(MONGO_URI, connect=False, serverSelectionTimeoutMS=5000, tz_aware=True)
 db = client[MONGO_DB]
+application_client = client
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db.employees.create_index([("emp_code", 1)], unique=True)
-    db.employees.create_index([("department", 1), ("joined_on", 1), ("emp_code", 1)])
-    db.employees.create_index([("department", 1), ("emp_code", 1)])
-    db.employees.create_index([("joined_on", 1)])
+    try:
+        db.command("ping")
+        db.employees.create_index([("emp_code", 1)], unique=True)
+        db.employees.create_index([("department", 1), ("joined_on", 1), ("emp_code", 1)])
+        db.employees.create_index([("department", 1), ("emp_code", 1)])
+        db.employees.create_index([("joined_on", 1)])
 
-    db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
-    db.attendance_logs.create_index([("date", -1), ("emp_code", 1)])
-    db.attendance_logs.create_index([("date", 1), ("emp_code", 1)])
-    db.attendance_logs.create_index([("emp_code", 1), ("date", 1), ("status", 1)])
-    db.attendance_logs.create_index([("date", 1), ("late_minutes", 1)])
-    yield
+        db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
+        db.attendance_logs.create_index([("date", -1), ("emp_code", 1)])
+        db.attendance_logs.create_index([("date", 1), ("emp_code", 1)])
+        db.attendance_logs.create_index([("emp_code", 1), ("date", 1), ("status", 1)])
+        db.attendance_logs.create_index([("date", 1), ("late_minutes", 1)])
+    except Exception:
+        application_client.close()
+        raise RuntimeError("MongoDB Atlas connection or index initialization failed; verify Atlas configuration and access.") from None
+    try:
+        yield
+    finally:
+        application_client.close()
 
 
 app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0", lifespan=lifespan)

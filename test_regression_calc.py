@@ -35,6 +35,7 @@ import pytest
 from fastapi.testclient import TestClient
 from datetime import datetime, timezone, timedelta
 
+import app.main as app_main
 from app.main import app, db
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -67,11 +68,21 @@ def _utc_from_ist(year, month, day, hour, minute, second=0) -> datetime:
 
 @pytest.fixture(autouse=True)
 def clean_db():
-    assert "test" in db.name.lower(), f"Refusing to run destructive operations against non-test database: '{db.name}'"
+    assert db.name == "test_attendance_db", f"Refusing to run destructive operations against unexpected database: '{db.name}'"
     db.employees.delete_many({})
     db.attendance_logs.delete_many({})
     with TestClient(app) as tc:
         yield tc
+
+
+def test_shared_test_client_survives_sequential_lifespans():
+    shared_client = app_main.client
+    assert db.client is shared_client
+
+    for _ in range(2):
+        with TestClient(app):
+            assert db.command("ping")["ok"] == 1
+        assert db.command("ping")["ok"] == 1
 
 
 def _create_emp(tc, emp_code="EMP9875", shift_start="09:30", shift_end="18:30"):

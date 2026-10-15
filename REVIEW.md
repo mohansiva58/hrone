@@ -31,3 +31,9 @@ List of defects found in the starter `app/main.py` (helpers and endpoints):
 - `IST` timezone definition (`timezone(timedelta(hours=5, minutes=30))`): Verified correct for converting UTC BSON dates to IST calendar dates.
 - Pydantic models reject explicit null for non-nullable inputs, ignore known derived fields, and reject unrelated extras; FastAPI returns HTTP 422 for invalid requests.
 - `attendance_pct` precision: Computed as `(present_days / working_days) × 100` — this is a percentage and correctly uses 2 decimal places (ROUND_HALF_UP per R8). `attendance_rate` and `moving_avg_7d` in the trend endpoint are rates (0–1) and correctly use 4 decimal places.
+
+### Atlas migration fixes
+
+- Removed the implicit local MongoDB runtime fallback. Runtime configuration now requires a syntactically valid Atlas SRV URI, uses a bounded server-selection timeout, and closes the shared client when the FastAPI lifespan ends.
+- Replaced local-only pytest safety with explicit `ALLOW_ATLAS_TESTS=1` opt-in, Atlas SRV validation, and a dedicated `test_` database selection. The test harness validates safety before creating its client and never drops a database.
+- Updated the run/test instructions and added a placeholder-only `.env.example`. Actual Atlas connectivity and full-suite status must be recorded from the execution environment; code inspection alone does not establish release readiness.

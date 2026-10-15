@@ -9,3 +9,5 @@
 4. **Headcount:** Department summary starts from eligible employees, not logs. Eligibility is `joined_on <= month end`; lookup with preserved empty arrays keeps employees with no logs.
 
 5. **Scaling:** For 10M logs, benchmark explains and latency first. If aggregations are slow, add reconciled daily summaries with freshness checks; partition only after measuring shard keys and query patterns.
+
+6. **Database configuration and tests:** Runtime requires an Atlas SRV URI and defaults to `attendance_db`; it never silently connects to a local server. Destructive pytest runs require `ALLOW_ATLAS_TESTS=1` and always select a separate `test_` database (default `test_attendance_db`). The suite reuses the configured Atlas URI only after that explicit opt-in.
